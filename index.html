@@ -91,11 +91,17 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, doc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const firebaseConfig = JSON.parse(__firebase_config);
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'fxl-pink-xmas';
+        // --- SAFEGUARD: Check if environment variables exist ---
+        const hasFirebase = typeof __firebase_config !== 'undefined';
+        let app, auth, db, appId;
+
+        if (hasFirebase) {
+            const firebaseConfig = JSON.parse(__firebase_config);
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            appId = typeof __app_id !== 'undefined' ? __app_id : 'fxl-pink-xmas';
+        }
 
         let scene, camera, renderer, treeGroup, user;
         let treeParticles, treeOrigPos, treeCurrPos, treeVels, treeScatterPos;
@@ -112,20 +118,35 @@
         let treeRotationVel = 0.004;
 
         async function init() {
-            const initAuth = async () => {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            };
-            await initAuth();
-            onAuthStateChanged(auth, (u) => { user = u; if (user) checkUrlForSharedData(); });
+            // Only attempt Auth if Firebase is configured
+            if (hasFirebase) {
+                const initAuth = async () => {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                };
+                try {
+                    await initAuth();
+                    onAuthStateChanged(auth, (u) => { 
+                        user = u; 
+                        if (user) checkUrlForSharedData(); 
+                    });
+                } catch(e) { console.warn("Firebase Auth failed"); }
+            } else {
+                console.log("Running in Local Mode (No Firebase)");
+                document.getElementById('share-btn').style.display = 'none'; // Hide share button on local host
+            }
 
             setupThree();
             setupHands();
             setupEvents();
-            document.getElementById('loading-screen').style.display = 'none';
+            
+            // Remove loading screen
+            const loader = document.getElementById('loading-screen');
+            loader.style.opacity = '0';
+            setTimeout(() => loader.style.display = 'none', 500);
         }
 
         function showToast(msg) {
@@ -316,7 +337,8 @@
                     isHandOpen = opened >= 3;
                 }
             });
-            new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }, width: 640, height: 480 }).start();
+            new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }, width: 640, height: 480 }).start()
+                .catch(() => console.log("Camera access denied - falling back to passive rotation."));
         }
 
         function setupEvents() {
@@ -416,20 +438,23 @@
         }
 
         async function shareScene() {
-            if (!user) return;
+            if (!hasFirebase || !user) {
+                showToast("此模式不支持保存");
+                return;
+            }
             try {
                 showToast("同步云端...");
                 const photos = photoMeshes.map(p => ({ data: p.data }));
                 const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'shrines'), { photos, timestamp: Date.now(), owner: user.uid });
-                // Note: If you rename the file to index.html, this URL will work automatically on root
                 document.getElementById('share-url').innerText = window.location.origin + window.location.pathname + "?id=" + docRef.id;
                 document.getElementById('modal').style.display = 'block';
             } catch (e) { showToast("同步失败"); }
         }
 
         async function checkUrlForSharedData() {
+            if (!hasFirebase || !user) return;
             const id = new URLSearchParams(window.location.search).get('id');
-            if (id && user) {
+            if (id) {
                 try {
                     const s = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'shrines', id));
                     if (s.exists()) s.data().photos.forEach(p => addImageToScene(p.data));
