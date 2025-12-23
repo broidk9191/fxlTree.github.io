@@ -10,7 +10,6 @@
         
         .overlay { position: absolute; top: 40px; left: 40px; pointer-events: none; z-index: 10; }
         .overlay h1 { margin: 0; font-size: 2rem; letter-spacing: 5px; text-shadow: 0 0 15px rgba(255,182,193,0.8); }
-        .overlay p { opacity: 0.8; margin-top: 10px; font-size: 0.9rem; letter-spacing: 1px; line-height: 1.6; }
 
         .controls {
             position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
@@ -25,10 +24,7 @@
         .btn:hover { background: rgba(255, 105, 180, 0.4); box-shadow: 0 0 20px rgba(255,182,193,0.4); }
         
         #photo-input { display: none; }
-
-        #video-feed {
-            position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
-        }
+        #video-feed { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
         #modal {
             position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -40,16 +36,15 @@
         #loading-screen {
             position: fixed; inset: 0; background: #050505; z-index: 9999;
             display: flex; flex-direction: column; justify-content: center; align-items: center; font-size: 1.1rem;
-            letter-spacing: 2px;
+            letter-spacing: 2px; transition: opacity 0.8s ease;
         }
 
         .toast {
             position: fixed; top: 20px; right: 20px; padding: 15px 25px; 
             background: rgba(255, 182, 193, 0.2); border: 1px solid #ffb6c1;
             color: white; border-radius: 8px; backdrop-filter: blur(10px);
-            z-index: 10000; display: none; animation: fadeIn 0.3s;
+            z-index: 10000; display: none;
         }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
@@ -59,11 +54,7 @@
     </div>
 
     <div id="toast" class="toast"></div>
-
-    <div class="overlay">
-        <h1>冯锌绫专属圣诞树</h1>
-    </div>
-
+    <div class="overlay"><h1>冯锌绫专属圣诞树</h1></div>
     <video id="video-feed" autoplay playsinline></video>
 
     <div class="controls">
@@ -87,20 +78,24 @@
     <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, doc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // --- SAFEGUARD: Check if environment variables exist ---
-        const hasFirebase = typeof __firebase_config !== 'undefined';
-        let app, auth, db, appId;
-
-        if (hasFirebase) {
-            const firebaseConfig = JSON.parse(__firebase_config);
-            app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getFirestore(app);
-            appId = typeof __app_id !== 'undefined' ? __app_id : 'fxl-pink-xmas';
+        // Dynamic imports for Firebase to prevent blocking the entire script if network fails
+        let firebaseApp, firebaseAuth, firebaseFirestore;
+        
+        async function loadFirebase() {
+            try {
+                const [app, auth, db] = await Promise.all([
+                    import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js"),
+                    import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"),
+                    import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js")
+                ]);
+                firebaseApp = app;
+                firebaseAuth = auth;
+                firebaseFirestore = db;
+                return true;
+            } catch (e) {
+                console.warn("Firebase modules failed to load. Operating in local mode.");
+                return false;
+            }
         }
 
         let scene, camera, renderer, treeGroup, user;
@@ -111,48 +106,57 @@
         let gifts = [];
         let teddyBear;
         
-        let isHandOpen = false;
-        let isPinching = false;
-        let handX = 0, handY = 0;
-        let prevHandX = 0;
+        let isHandOpen = false, isPinching = false;
+        let handX = 0, handY = 0, prevHandX = 0;
         let treeRotationVel = 0.004;
 
         async function init() {
-            // Only attempt Auth if Firebase is configured
-            if (hasFirebase) {
-                const initAuth = async () => {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
-                };
-                try {
-                    await initAuth();
-                    onAuthStateChanged(auth, (u) => { 
-                        user = u; 
-                        if (user) checkUrlForSharedData(); 
-                    });
-                } catch(e) { console.warn("Firebase Auth failed"); }
-            } else {
-                console.log("Running in Local Mode (No Firebase)");
-                document.getElementById('share-btn').style.display = 'none'; // Hide share button on local host
+            try {
+                // 1. Setup Three.js immediately
+                setupThree();
+
+                // 2. Hide loading screen as soon as rendering is ready
+                const loader = document.getElementById('loading-screen');
+                loader.style.opacity = '0';
+                setTimeout(() => loader.style.display = 'none', 800);
+
+                // 3. Attempt to load Cloud features in the background
+                const firebaseLoaded = await loadFirebase();
+                if (firebaseLoaded && typeof __firebase_config !== 'undefined') {
+                    const config = JSON.parse(__firebase_config);
+                    const appInstance = firebaseApp.initializeApp(config);
+                    const authInstance = firebaseAuth.getAuth(appInstance);
+                    const dbInstance = firebaseFirestore.getFirestore(appInstance);
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'fxl-pink-xmas';
+
+                    const initAuth = async () => {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await firebaseAuth.signInWithCustomToken(authInstance, __initial_auth_token);
+                        } else {
+                            await firebaseAuth.signInAnonymously(authInstance);
+                        }
+                    };
+                    
+                    initAuth().then(() => {
+                        firebaseAuth.onAuthStateChanged(authInstance, (u) => { 
+                            user = u; 
+                            if (user) checkUrlForSharedData(dbInstance, appId); 
+                        });
+                    }).catch(e => console.warn("Auth init failed"));
+
+                    document.getElementById('share-btn').onclick = () => shareScene(dbInstance, appId);
+                } else {
+                    document.getElementById('share-btn').style.display = 'none';
+                }
+
+                // 4. Init Hand Tracking
+                setupHands();
+                setupEvents();
+                animate();
+            } catch (err) {
+                console.error("Initialization error:", err);
+                document.getElementById('loading-text').innerText = "加载遇到问题，请检查网络后刷新";
             }
-
-            setupThree();
-            setupHands();
-            setupEvents();
-            
-            // Remove loading screen
-            const loader = document.getElementById('loading-screen');
-            loader.style.opacity = '0';
-            setTimeout(() => loader.style.display = 'none', 500);
-        }
-
-        function showToast(msg) {
-            const t = document.getElementById('toast');
-            t.innerText = msg; t.style.display = 'block';
-            setTimeout(() => t.style.display = 'none', 3000);
         }
 
         function setupThree() {
@@ -201,9 +205,8 @@
                         const branchDir = Math.floor(Math.random() * 9) * (Math.PI * 2 / 9) + branchSpiral;
                         const maxLen = (1.1 - h) * 3.2; 
                         const reach = Math.pow(Math.random(), 0.7);
-                        const droopFactor = Math.pow(reach, 1.8) * 0.7;
                         const finalR = maxLen * reach + (Math.random() - 0.5) * 0.25;
-                        x = Math.cos(branchDir) * finalR; z = Math.sin(branchDir) * finalR; y = heightOffset - droopFactor;
+                        x = Math.cos(branchDir) * finalR; z = Math.sin(branchDir) * finalR; y = heightOffset - (Math.pow(reach, 1.8) * 0.7);
                         c = foliageInner.clone().lerp(foliageOuter, reach);
                     }
                 } else if (i < baseTreeCount + ribbonCount) {
@@ -234,14 +237,13 @@
             treeParticles = new THREE.Points(treeGeo, new THREE.PointsMaterial({ size: 0.03, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, opacity: 0.8 }));
             treeGroup.add(treeParticles);
 
-            const starCount = 2500;
+            const starCount = 2000;
             const starGeo = new THREE.BufferGeometry();
             starOrigPos = new Float32Array(starCount * 3);
             starCurrPos = new Float32Array(starCount * 3);
             starScatterPos = new Float32Array(starCount * 3);
             starVels = new Float32Array(starCount * 3);
             const starCols = new Float32Array(starCount * 3);
-            const starY = 5.6; 
             for(let i=0; i<starCount; i++) {
                 const section = Math.floor(Math.random() * 10);
                 const a1 = (section * Math.PI) / 5 - Math.PI/2, a2 = ((section + 1) * Math.PI) / 5 - Math.PI/2;
@@ -249,79 +251,58 @@
                 let u = Math.random(), v = Math.random();
                 if (u + v > 1) { u = 1 - u; v = 1 - v; }
                 starOrigPos[i*3] = u * Math.cos(a1) * r1 + v * Math.cos(a2) * r2;
-                starOrigPos[i*3+1] = u * Math.sin(a1) * r1 + v * Math.sin(a2) * r2 + starY;
+                starOrigPos[i*3+1] = u * Math.sin(a1) * r1 + v * Math.sin(a2) * r2 + 5.6;
                 starOrigPos[i*3+2] = (Math.random() - 0.5) * 0.2;
-                const sa = Math.random() * Math.PI * 2, sd = 10 + Math.random() * 5;
-                starScatterPos[i*3] = Math.cos(sa) * sd; starScatterPos[i*3+1] = 8 + (Math.random() - 0.5) * 8; starScatterPos[i*3+2] = Math.sin(sa) * sd;
+                const sa = Math.random() * Math.PI * 2, sd = 10;
+                starScatterPos[i*3] = Math.cos(sa) * sd; starScatterPos[i*3+1] = 8; starScatterPos[i*3+2] = Math.sin(sa) * sd;
                 starCurrPos[i*3] = starOrigPos[i*3]; starCurrPos[i*3+1] = starOrigPos[i*3+1]; starCurrPos[i*3+2] = starOrigPos[i*3+2];
                 starCols[i*3] = 1.0; starCols[i*3+1] = 0.95; starCols[i*3+2] = 0.5;
             }
             starGeo.setAttribute('position', new THREE.BufferAttribute(starCurrPos, 3));
             starGeo.setAttribute('color', new THREE.BufferAttribute(starCols, 3));
-            starParticles = new THREE.Points(starGeo, new THREE.PointsMaterial({ size: 0.045, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, opacity: 1.0 }));
+            starParticles = new THREE.Points(starGeo, new THREE.PointsMaterial({ size: 0.045, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending }));
             treeGroup.add(starParticles);
 
             starLight = new THREE.PointLight(0xffe066, 8, 20);
-            starLight.position.y = starY;
+            starLight.position.y = 5.6;
             treeGroup.add(starLight);
-
-            const fGeo = new THREE.BufferGeometry();
-            const fPos = new Float32Array(5000 * 3);
-            for(let i=0; i<5000; i++) {
-                const a = Math.random() * Math.PI * 2, r = 4 + Math.random() * 6;
-                fPos[i*3] = Math.cos(a) * r; fPos[i*3+1] = -2.25 + Math.random() * 0.15; fPos[i*3+2] = Math.sin(a) * r;
-            }
-            fGeo.setAttribute('position', new THREE.BufferAttribute(fPos, 3));
-            floorParticles = new THREE.Points(fGeo, new THREE.PointsMaterial({ size: 0.012, color: 0xffffff, transparent: true, opacity: 0.25 }));
-            treeGroup.add(floorParticles);
 
             createGifts();
             createTeddyBear();
-            animate();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
         }
 
         function createGifts() {
             const colors = [0xff69b4, 0xff1493, 0xffb6c1, 0xdb7093, 0xc71585];
             for(let i=0; i<6; i++) {
                 const size = 0.4 + Math.random() * 0.3;
-                const gift = new THREE.Mesh(
-                    new THREE.BoxGeometry(size, size, size),
-                    new THREE.MeshStandardMaterial({ color: colors[i % colors.length], transparent: true, opacity: 1 })
-                );
+                const gift = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), new THREE.MeshStandardMaterial({ color: colors[i % colors.length], transparent: true }));
                 const angle = (i / 6) * Math.PI * 2, dist = 1.2 + Math.random() * 0.8;
                 gift.position.set(Math.cos(angle)*dist, -2.1 + size/2, Math.sin(angle)*dist);
-                gift.rotation.y = Math.random() * Math.PI;
                 treeGroup.add(gift);
                 gifts.push(gift);
-                const rib = new THREE.Mesh(new THREE.BoxGeometry(size + 0.05, size/4, size + 0.05), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 }));
-                gift.add(rib);
             }
             scene.add(new THREE.AmbientLight(0xffffff, 0.4));
         }
 
         function createTeddyBear() {
             teddyBear = new THREE.Group();
-            const brown = new THREE.MeshStandardMaterial({ color: 0x8b4513, transparent: true, opacity: 1 });
-            const dark = new THREE.MeshStandardMaterial({ color: 0x222222, transparent: true, opacity: 1 });
-            const body = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 16), brown); body.scale.y = 1.2; teddyBear.add(body);
+            const brown = new THREE.MeshStandardMaterial({ color: 0x8b4513, transparent: true });
             const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 16), brown); head.position.y = 0.5; teddyBear.add(head);
-            const earL = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), brown); earL.position.set(-0.2, 0.7, 0); teddyBear.add(earL);
-            const earR = earL.clone(); earR.position.set(0.2, 0.7, 0); teddyBear.add(earR);
-            const limb = new THREE.SphereGeometry(0.12, 12, 12);
-            const armL = new THREE.Mesh(limb, brown); armL.position.set(-0.35, 0.2, 0.1); teddyBear.add(armL);
-            const armR = armL.clone(); armR.position.set(0.35, 0.2, 0.1); teddyBear.add(armR);
-            const legL = new THREE.Mesh(limb, brown); legL.position.set(-0.2, -0.4, 0.2); teddyBear.add(legL);
-            const legR = legL.clone(); legR.position.set(0.2, -0.4, 0.2); teddyBear.add(legR);
-            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 8), dark); eye.position.set(-0.1, 0.55, 0.25); teddyBear.add(eye);
-            const eyeR = eye.clone(); eyeR.position.set(0.1, 0.55, 0.25); teddyBear.add(eyeR);
-            teddyBear.position.set(1.2, -1.85, -1.2); teddyBear.rotation.y = -Math.PI / 4;
+            const body = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 16), brown); body.scale.y = 1.2; teddyBear.add(body);
+            teddyBear.position.set(1.2, -1.85, -1.2);
             treeGroup.add(teddyBear);
         }
 
         function setupHands() {
             const videoElement = document.getElementById('video-feed');
             const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.65, minTrackingConfidence: 0.65 });
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.65 });
             hands.onResults((results) => {
                 if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     const lm = results.multiHandLandmarks[0];
@@ -329,46 +310,12 @@
                     handX = -(lm[9].x - 0.5) * 18;
                     handY = -(lm[9].y - 0.5) * 12 + 1;
                     const thumb = lm[4], index = lm[8];
-                    const dist = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2));
-                    isPinching = dist < 0.05;
-                    const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
-                    let opened = 0;
-                    for(let i=0; i<4; i++) { if(lm[tips[i]].y < lm[pips[i]].y) opened++; }
-                    isHandOpen = opened >= 3;
+                    isPinching = Math.sqrt(Math.pow(thumb.x-index.x,2)+Math.pow(thumb.y-index.y,2)) < 0.05;
+                    isHandOpen = lm[8].y < lm[6].y && lm[12].y < lm[10].y;
                 }
             });
-            new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }, width: 640, height: 480 }).start()
-                .catch(() => console.log("Camera access denied - falling back to passive rotation."));
-        }
-
-        function setupEvents() {
-            const input = document.getElementById('photo-input');
-            input.onchange = async (e) => {
-                let file = e.target.files[0]; if (!file) return;
-                try {
-                    if (file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif')) {
-                        const blob = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.7 });
-                        file = new File([Array.isArray(blob) ? blob[0] : blob], "mem.jpg", { type: "image/jpeg" });
-                    }
-                    const r = new FileReader();
-                    r.onload = (ev) => addImageToScene(ev.target.result);
-                    r.readAsDataURL(file);
-                } catch (err) { showToast("加载出错"); }
-            };
-            document.getElementById('share-btn').onclick = shareScene;
-        }
-
-        function addImageToScene(url) {
-            new THREE.TextureLoader().load(url, (t) => {
-                const m = new THREE.MeshBasicMaterial({ map: t, side: THREE.DoubleSide, transparent: true, opacity: 0, depthWrite: false });
-                const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.6), m);
-                const a = Math.random() * Math.PI * 2, r = 3.5 + Math.random() * 2.5;
-                mesh.position.set(Math.cos(a)*r, Math.random()*5, Math.sin(a)*r);
-                mesh.scale.set(0.01, 0.01, 0.01);
-                mesh.lookAt(0, mesh.position.y, 0);
-                treeGroup.add(mesh);
-                photoMeshes.push({ mesh, data: url });
-            });
+            const cam = new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }, width: 640, height: 480 });
+            cam.start().catch(() => console.log("Camera disabled"));
         }
 
         function animate() {
@@ -376,97 +323,83 @@
             const t = Date.now() * 0.001;
             treeGroup.position.x += (handX - treeGroup.position.x) * 0.08;
             treeGroup.position.y += (handY - treeGroup.position.y) * 0.08;
-            if (isPinching) {
-                const deltaX = handX - prevHandX;
-                treeRotationVel = deltaX * 0.05;
-            } else {
-                treeRotationVel += (0.004 - treeRotationVel) * 0.05;
-            }
+
+            if (isPinching) treeRotationVel = (handX - prevHandX) * 0.05;
+            else treeRotationVel += (0.004 - treeRotationVel) * 0.05;
             treeGroup.rotation.y += treeRotationVel;
+
             const opTarget = isHandOpen ? 0.2 : 0.8;
-            const treePAttr = treeParticles.geometry.attributes.position;
             treeParticles.material.opacity += (opTarget - treeParticles.material.opacity) * 0.04;
-            for(let i=0; i<treePAttr.count; i++) {
+            
+            const posAttr = treeParticles.geometry.attributes.position;
+            for(let i=0; i<posAttr.count; i++) {
                 let ix = i*3, iy = i*3+1, iz = i*3+2;
                 let tx = isHandOpen ? treeScatterPos[ix] : treeOrigPos[ix];
                 let ty = isHandOpen ? treeScatterPos[iy] : treeOrigPos[iy];
                 let tz = isHandOpen ? treeScatterPos[iz] : treeOrigPos[iz];
-                const f = isHandOpen ? 0.02 : 0.12;
-                treeVels[ix] += (tx - treeCurrPos[ix]) * f; treeVels[iy] += (ty - treeCurrPos[iy]) * f; treeVels[iz] += (tz - treeCurrPos[iz]) * f;
-                treeCurrPos[ix] += treeVels[ix]; treeCurrPos[iy] += treeVels[iy]; treeCurrPos[iz] += treeVels[iz];
+                treeVels[ix] += (tx - treeCurrPos[ix]) * 0.1; treeVels[iy] += (ty - treeCurrPos[iy]) * 0.1; treeVels[iz] += (tz - treeCurrPos[iz]) * 0.1;
+                treeCurrPos[ix] += treeVels[ix] * 0.7; treeCurrPos[iy] += treeVels[iy] * 0.7; treeCurrPos[iz] += treeVels[iz] * 0.7;
                 treeVels[ix] *= 0.7; treeVels[iy] *= 0.7; treeVels[iz] *= 0.7;
             }
-            treePAttr.needsUpdate = true;
-            const starPAttr = starParticles.geometry.attributes.position;
-            starParticles.material.opacity += ((isHandOpen ? 0.3 : 1.0) - starParticles.material.opacity) * 0.04;
-            for(let i=0; i<starPAttr.count; i++) {
-                let ix = i*3, iy = i*3+1, iz = i*3+2;
-                let tx = isHandOpen ? starScatterPos[ix] : starOrigPos[ix];
-                let ty = isHandOpen ? starScatterPos[iy] : starOrigPos[iy];
-                let tz = isHandOpen ? starScatterPos[iz] : starOrigPos[iz];
-                const f = isHandOpen ? 0.015 : 0.15;
-                starVels[ix] += (tx - starCurrPos[ix]) * f; starVels[iy] += (ty - starCurrPos[iy]) * f; starVels[iz] += (tz - starCurrPos[iz]) * f;
-                starCurrPos[ix] += starVels[ix]; starCurrPos[iy] += starVels[iy]; starCurrPos[iz] += starVels[iz];
-                starVels[ix] *= 0.7; starVels[iy] *= 0.7; starVels[iz] *= 0.7;
-            }
-            starPAttr.needsUpdate = true;
-            floorParticles.rotation.y += 0.001;
-            floorParticles.material.opacity += (opTarget*0.3 - floorParticles.material.opacity) * 0.04;
-            const physOp = isHandOpen ? 0.0 : 1.0;
-            gifts.forEach((g, idx) => {
-                g.material.opacity += (physOp - g.material.opacity) * 0.1;
-                g.children.forEach(c => c.material.opacity = g.material.opacity);
-                g.position.y += ((-2.1 + 0.25 + (isHandOpen ? 0.5 : 0)) - g.position.y) * 0.1;
-                g.scale.setScalar(1 + Math.sin(t*2 + idx) * 0.05);
-            });
-            if(teddyBear) {
-                teddyBear.traverse(n => { if(n.isMesh) n.material.opacity += (physOp - n.material.opacity) * 0.1; });
-                teddyBear.position.y += ((-1.85 + (isHandOpen ? 0.3 : 0)) - teddyBear.position.y) * 0.1;
-            }
+            posAttr.needsUpdate = true;
+
             photoMeshes.forEach(p => {
-                if(isHandOpen) {
-                    p.mesh.scale.lerp(new THREE.Vector3(2.2, 2.2, 2.2), 0.06);
-                    p.mesh.material.opacity += (1.0 - p.mesh.material.opacity) * 0.08;
-                } else {
-                    p.mesh.scale.lerp(new THREE.Vector3(0.01, 0.01, 0.01), 0.1);
-                    p.mesh.material.opacity += (0.0 - p.mesh.material.opacity) * 0.12;
-                    p.mesh.lookAt(0, p.mesh.position.y, 0);
-                }
+                const s = isHandOpen ? 2.2 : 0.01;
+                p.mesh.scale.lerp(new THREE.Vector3(s,s,s), 0.1);
+                p.mesh.material.opacity += ((isHandOpen ? 1 : 0) - p.mesh.material.opacity) * 0.1;
             });
-            starLight.intensity = (isHandOpen ? 1.5 : 8) + Math.sin(t*4) * 3;
+
+            starLight.intensity = (isHandOpen ? 1.5 : 8) + Math.sin(t*4) * 2;
             renderer.render(scene, camera);
         }
 
-        async function shareScene() {
-            if (!hasFirebase || !user) {
-                showToast("此模式不支持保存");
-                return;
-            }
-            try {
-                showToast("同步云端...");
-                const photos = photoMeshes.map(p => ({ data: p.data }));
-                const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'shrines'), { photos, timestamp: Date.now(), owner: user.uid });
-                document.getElementById('share-url').innerText = window.location.origin + window.location.pathname + "?id=" + docRef.id;
-                document.getElementById('modal').style.display = 'block';
-            } catch (e) { showToast("同步失败"); }
+        function setupEvents() {
+            document.getElementById('photo-input').onchange = async (e) => {
+                let file = e.target.files[0];
+                if (!file) return;
+                if (file.name.toLowerCase().endsWith('.heic')) {
+                    const blob = await heic2any({ blob: file, toType: "image/jpeg" });
+                    file = new File([Array.isArray(blob)?blob[0]:blob], "m.jpg", {type:"image/jpeg"});
+                }
+                const r = new FileReader();
+                r.onload = (ev) => addImageToScene(ev.target.result);
+                r.readAsDataURL(file);
+            };
         }
 
-        async function checkUrlForSharedData() {
-            if (!hasFirebase || !user) return;
+        function addImageToScene(url) {
+            new THREE.TextureLoader().load(url, (t) => {
+                const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.6), new THREE.MeshBasicMaterial({ map: t, transparent: true, opacity: 0 }));
+                const a = Math.random()*Math.PI*2, r = 4;
+                mesh.position.set(Math.cos(a)*r, Math.random()*5, Math.sin(a)*r);
+                mesh.lookAt(0, mesh.position.y, 0);
+                treeGroup.add(mesh);
+                photoMeshes.push({ mesh, data: url });
+            });
+        }
+
+        async function shareScene(db, appId) {
+            if (!user) return;
+            try {
+                const photos = photoMeshes.map(p => ({ data: p.data }));
+                const docRef = await firebaseFirestore.addDoc(firebaseFirestore.collection(db, 'artifacts', appId, 'public', 'data', 'shrines'), { photos, timestamp: Date.now() });
+                document.getElementById('share-url').innerText = window.location.origin + window.location.pathname + "?id=" + docRef.id;
+                document.getElementById('modal').style.display = 'block';
+            } catch (e) { console.error(e); }
+        }
+
+        async function checkUrlForSharedData(db, appId) {
             const id = new URLSearchParams(window.location.search).get('id');
             if (id) {
-                try {
-                    const s = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'shrines', id));
-                    if (s.exists()) s.data().photos.forEach(p => addImageToScene(p.data));
-                } catch (e) {}
+                const s = await firebaseFirestore.getDoc(firebaseFirestore.doc(db, 'artifacts', appId, 'public', 'data', 'shrines', id));
+                if (s.exists()) s.data().photos.forEach(p => addImageToScene(p.data));
             }
         }
 
         window.copyLink = () => {
-            const u = document.getElementById('share-url').innerText;
-            const el = document.createElement('textarea'); el.value = u; document.body.appendChild(el);
-            el.select(); document.execCommand('copy'); document.body.removeChild(el);
-            showToast("已复制专属链接!");
+            const el = document.createElement('textarea'); el.value = document.getElementById('share-url').innerText;
+            document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el);
+            alert("已复制链接!");
         };
         window.closeModal = () => document.getElementById('modal').style.display = 'none';
 
